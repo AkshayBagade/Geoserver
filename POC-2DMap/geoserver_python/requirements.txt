@@ -1,0 +1,14 @@
+Django
+psycopg2
+djangorestframework
+django-cors-headers
+requests
+gsconfig-py3
+pandas
+shapely
+scipy
+numpy
+matplotlib
+channels
+geopandas
+gdal[numpy]==3.6.2

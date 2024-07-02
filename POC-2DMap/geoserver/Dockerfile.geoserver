@@ -1,0 +1,19 @@
+# Use the official GeoServer image as the base
+FROM docker.osgeo.org/geoserver:2.25.1
+
+# Install dependencies
+RUN apt-get update && apt-get install -y unzip
+
+# Copy the S3 plugin from the local machine to the Docker image
+COPY geoserver-2.25.1-gwc-s3-plugin.zip /tmp/geoserver-2.25.1-gwc-s3-plugin.zip
+
+# Unzip the plugin and move it to the GeoServer WEB-INF/lib directory
+RUN unzip /tmp/geoserver-2.25.1-gwc-s3-plugin.zip -d /tmp/geoserver-2.25.1-gwc-s3-plugin \
+    && mv /tmp/geoserver-2.25.1-gwc-s3-plugin/*.jar /opt/apache-tomcat-9.0.86/webapps/geoserver/WEB-INF/lib/ \
+    && rm -rf /tmp/geoserver-2.25.1-gwc-s3-plugin.zip /tmp/geoserver-2.25.1-gwc-s3-plugin
+
+# Expose the default GeoServer port
+EXPOSE 8081
+
+# Run GeoServer
+CMD ["./bin/startup.sh"]

@@ -1,0 +1,37 @@
+FROM python:3.9-slim
+
+WORKDIR /app
+
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    gdal-bin \
+    libgdal-dev \
+    python3-gdal \
+    build-essential
+
+# Set environment variables for GDAL
+ENV CPLUS_INCLUDE_PATH=/usr/include/gdal
+ENV C_INCLUDE_PATH=/usr/include/gdal
+
+# Install pip packages
+RUN pip install --upgrade pip
+
+# Install dependencies
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+RUN pip install --no-cache-dir --force-reinstall 'GDAL[numpy]==3.6.2'
+
+# Copy your application code to the container
+COPY . .
+
+# Collect static files
+RUN python manage.py collectstatic --noinput
+
+# Install Daphne and Channels
+RUN pip install daphne channels
+
+EXPOSE 5000
+
+# Run your application
+CMD ["daphne", "-b", "0.0.0.0", "-p", "5000", "geoserver_python.asgi:application"]

@@ -1,0 +1,54 @@
+
+services:
+  angular-app:
+    build:
+      context: ./angular
+      dockerfile: Dockerfile.angular
+    ports:
+      - "4200:4200"
+    depends_on:
+      - python-app
+      - geoserver
+
+  python-app:
+    build:
+      context: ./geoserver_python
+      dockerfile: Dockerfile.python
+    volumes:
+      - .:/app
+    ports:
+      - 5000:5000
+    depends_on:
+#      - geoserver
+       - db
+    environment:
+      - POSTGRES_DB=postgres
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=Maxval@123
+    command: daphne -b 0.0.0.0 -p 5000 geoserver_python.asgi:application
+
+  geoserver:
+    build:
+      context: ./geoserver
+      dockerfile: Dockerfile.geoserver
+    ports:
+      - "8081:8080"
+    volumes:
+      - geoserver_data:/var/lib/geoserver/data
+    depends_on:
+      - db
+
+  db:
+    image: postgis/postgis:13-3.1
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: Maxval@123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
+  geoserver_data:
