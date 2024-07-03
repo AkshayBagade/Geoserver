@@ -12,6 +12,7 @@ from shapely.geometry import Polygon as poly
 from django.contrib.gis.geos import Polygon,Point,LineString
 import math
 from channels.layers import get_channel_layer
+from .tasks import my_task
 from asgiref.sync import async_to_sync
 import requests
 
@@ -82,6 +83,57 @@ import concurrent.futures
 import time
 from osgeo import gdal, osr
 import os
+
+
+def concurrency_logic(file, task=None):
+    batch_size = 1000
+    points_data = []
+    pile_data =  []
+    channel_layer = get_channel_layer()
+    channel_name = 'progress_group'
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        futures = []
+        for line in file:
+            for data in line:
+                try:
+                    points_data.append(data)
+                    pile_data.append(data['piles'])
+                except json.JSONDecodeError:
+                    pass
+
+            if len(points_data) >= batch_size:
+                # Submit tasks for parallel processing
+                futures.append(executor.submit(process_points, points_data.copy()))
+                futures.append(executor.submit(process_polygons, pile_data.copy()))
+                points_data = []
+                pile_data = []
+
+        # Process remaining points
+        if points_data:
+            futures.append(executor.submit(process_points, points_data))
+            futures.append(executor.submit(process_polygons, pile_data))
+
+        # Collect results from futures
+        points_to_create = []
+        triangle_to_create = []
+
+        total_futures = len(futures)
+        completed_futures = 0
+        for future in concurrent.futures.as_completed(futures):
+            completed_futures += 1
+
+
+        progress = 2  # Scale to 0-50%
+        try:
+            async_to_sync(channel_layer.group_send)(
+                channel_name,
+                {
+                    'type': 'send.progress',
+                    'progress': progress
+                }
+            )
+        except Exception as e:
+            print(e)
 @api_view(['POST'])
 # Main function to handle the file upload and parallel processing
 def upload_points_v1(request):
@@ -103,84 +155,37 @@ def upload_points_v1(request):
         pile_data = []
         file = pd.read_json(file)
         total_lines = len(file['Trackers'])
-        processed_lines = 0
+        batches = total_lines / batch_size
+        batches = math.ceil(batches)
+        w = 0
+        batch_list = []
+        for i in range(0, batches):
+            temp = []
+            data = file['Trackers'][w: w + batch_size]
+            temp.append(data.tolist())
+            batch_list.append(temp)
+            w = w + batch_size
 
-        with concurrent.futures.ProcessPoolExecutor() as executor:
-            futures = []
-            for line in file['Trackers']:
-                try:
-                    points_data.append(line)
-                    pile_data.append(line['piles'])
-                except json.JSONDecodeError:
-                    pass
+        for batch in batch_list:
+            task_result = my_task.delay(batch)
 
-                if len(points_data) >= batch_size:
-                    # Submit tasks for parallel processing
-                    futures.append(executor.submit(process_points, points_data.copy()))
-                    futures.append(executor.submit(process_polygons, pile_data.copy()))
-                    points_data = []
-                    pile_data = []
+        return_info = {
+            'message': 'Mercator QA analysis service run queued',
+            'task_id': task_result.id
+        }
 
-                # Update progress
-                processed_lines += 1
-                progress = int((processed_lines / total_lines) * 50)  # Scale to 0-50%
-                try:
-                    async_to_sync(channel_layer.group_send)(
-                        channel_name,
-                        {
-                            'type': 'send.progress',
-                            'progress': progress
-                        }
-                    )
-                except Exception as e:
-                    print(e)
-
-            # Process remaining points
-            if points_data:
-                futures.append(executor.submit(process_points, points_data))
-                futures.append(executor.submit(process_polygons, pile_data))
-
-            # Collect results from futures
-            points_to_create = []
-            triangle_to_create = []
-
-            total_futures = len(futures)
-            completed_futures = 0
-            for future in concurrent.futures.as_completed(futures):
-                result = future.result()
-                if isinstance(result, list) and len(result) > 0:
-                    if isinstance(result[0], GISPointModel):
-                        points_to_create.extend(result)
-                    elif isinstance(result[0], GISDelunaryTriangleModel):
-                        triangle_to_create.extend(result)
-
-                # Update progress for the second part
-                completed_futures += 1
-                progress = 50 + int((completed_futures / total_futures) * 50)  # Scale to 50-100%
-                try:
-                    async_to_sync(channel_layer.group_send)(
-                        channel_name,
-                        {
-                            'type': 'send.progress',
-                            'progress': progress
-                        }
-                    )
-                except Exception as e:
-                    print(e)
-            #
-            # # Bulk create points and triangles
-            GISPointModel.objects.bulk_create(points_to_create)
-            GISDelunaryTriangleModel.objects.bulk_create(triangle_to_create)
-
-        # create_contour_layer()
-        create_geo_tiff()
         return Response({"status": "File processed successfully"}, status=status.HTTP_200_OK)
 
+
+    #     # create_contour_layer()
+    #     create_geo_tiff()
+    #     return Response({"status": "File processed successfully"}, status=status.HTTP_200_OK)
+    #
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-from django.db import transaction
+# from django.db import transaction
 # Helper function to process polygons using DataFrame
 def process_polygons(pile_data):
     polygon = delunary_calculate(pile_data)
@@ -193,7 +198,7 @@ def process_polygons(pile_data):
         GISDelunaryTriangleModel(name=row['name'], geom=row['geom'], grading=row['grading'])
         for _, row in df.iterrows()
     ]
-
+    GISDelunaryTriangleModel.objects.bulk_create(triangle_to_create)
     return triangle_to_create
 
 from pyproj import CRS
@@ -249,7 +254,7 @@ def process_points(points_data):
         GISPointModel(name=row['name'], geom=row['geom'], grading=row['grading'],bottom_of_pile=row['bottom_of_pile'])
         for _, row in df.iterrows()
     ]
-
+    GISPointModel.objects.bulk_create(points_to_create)
     return points_to_create
 
 @api_view(['POST'])
