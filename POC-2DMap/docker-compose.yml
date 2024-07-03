@@ -25,7 +25,13 @@ services:
       - POSTGRES_DB=postgres
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=Maxval@123
-    command: daphne -b 0.0.0.0 -p 5000 geoserver_python.asgi:application
+    deploy:
+      resources:
+        limits:
+          cpus: '6'
+          memory: 32G
+#    command: daphne -b 0.0.0.0 -p 5000 geoserver_python.asgi:application
+    command: ./manage.py runserver 0.0.0.0:5000
 
   geoserver:
     build:

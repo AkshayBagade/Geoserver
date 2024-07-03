@@ -82,6 +82,51 @@ import concurrent.futures
 import time
 from osgeo import gdal, osr
 import os
+
+def create_dynamic_table(file):
+    try:
+        table_name = 'demo_table'#file.name.replace('.json', '')
+        table_heatmap_name = 'demo_heatmap_table'
+        table_list = {'demo_table': Point,'demo_heatmap_table':Polygon}
+
+        sql_query = f"""
+                            CREATE TABLE IF NOT EXISTS {table_name} (
+                                id SERIAL PRIMARY KEY,
+                                name VARCHAR(100) NOT NULL,
+                                geom geometry(Point),
+                                grading NUMERIC(10, 5) DEFAULT 0.0
+                            );
+                        """
+        with connection.cursor() as cursor:
+            cursor.execute(sql_query)
+
+        sql_query = f"""
+                            CREATE TABLE IF NOT EXISTS {table_heatmap_name} (
+                                id SERIAL PRIMARY KEY,
+                                name VARCHAR(100) NOT NULL,
+                                geom geometry(Polygon),
+                                grading NUMERIC(10, 5) DEFAULT 0.0
+                            );
+                        """
+        with connection.cursor() as cursor:
+            cursor.execute(sql_query)
+    except Exception as e:
+        print(e)
+
+
+    # index = 0
+    # for list,value in table_list.items():
+    #     sql_query = f"""
+    #                 CREATE TABLE IF NOT EXISTS {list} (
+    #                     id SERIAL PRIMARY KEY,
+    #                     name VARCHAR(100) NOT NULL,
+    #                     geom geometry({value}),
+    #                     grading NUMERIC(10, 5) DEFAULT 0.0
+    #                 );
+    #             """
+    #     with connection.cursor() as cursor:
+    #         cursor.execute(sql_query)
+
 @api_view(['POST'])
 # Main function to handle the file upload and parallel processing
 def upload_points_v1(request):
@@ -92,85 +137,92 @@ def upload_points_v1(request):
     try:
         # Process file in batches
         # Initialize WebSocket channel layer
-        channel_layer = get_channel_layer()
-        channel_name = 'progress_group'
+        # channel_layer = get_channel_layer()
+        # channel_name = 'progress_group'
+
+        # create_dynamic_table(file)
+
         GISPointModel.objects.all().delete()
         GISDelunaryTriangleModel.objects.all().delete()
         GISContour.objects.all().delete()
 
-        batch_size = 1000 # Adjust batch size as needed
+        batch_size = 2500 # Adjust batch size as needed
         points_data = []
         pile_data = []
         file = pd.read_json(file)
         total_lines = len(file['Trackers'])
         processed_lines = 0
+        table_list = {'demo_table': Point, 'demo_heatmap_table': Polygon}
 
-        with concurrent.futures.ProcessPoolExecutor() as executor:
-            futures = []
-            for line in file['Trackers']:
-                try:
-                    points_data.append(line)
-                    pile_data.append(line['piles'])
-                except json.JSONDecodeError:
-                    pass
+        try:
+            with concurrent.futures.ProcessPoolExecutor() as executor:
+                futures = []
+                for line in file['Trackers']:
+                    try:
+                        points_data.append(line)
+                        pile_data.append(line['piles'])
+                    except json.JSONDecodeError:
+                        pass
 
-                if len(points_data) >= batch_size:
-                    # Submit tasks for parallel processing
-                    futures.append(executor.submit(process_points, points_data.copy()))
-                    futures.append(executor.submit(process_polygons, pile_data.copy()))
-                    points_data = []
-                    pile_data = []
+                    if len(points_data) >= batch_size:
+                        # Submit tasks for parallel processing
+                        executor.submit(process_points, points_data.copy(),list(table_list.keys())[0])
+                        executor.submit(process_polygons, pile_data.copy(),list(table_list.keys())[1])
+                        points_data = []
+                        pile_data = []
 
-                # Update progress
-                processed_lines += 1
-                progress = int((processed_lines / total_lines) * 50)  # Scale to 0-50%
-                try:
-                    async_to_sync(channel_layer.group_send)(
-                        channel_name,
-                        {
-                            'type': 'send.progress',
-                            'progress': progress
-                        }
-                    )
-                except Exception as e:
-                    print(e)
+                    # Update progress
+                    # processed_lines += 1
+                    # progress = int((processed_lines / total_lines) * 50)  # Scale to 0-50%
+                    # try:
+                    #     async_to_sync(channel_layer.group_send)(
+                    #         channel_name,
+                    #         {
+                    #             'type': 'send.progress',
+                    #             'progress': progress
+                    #         }
+                    #     )
+                    # except Exception as e:
+                    #     print(e)
 
-            # Process remaining points
-            if points_data:
-                futures.append(executor.submit(process_points, points_data))
-                futures.append(executor.submit(process_polygons, pile_data))
+                # Process remaining points
+                if points_data:
+                    executor.submit(process_points, points_data,list(table_list.keys())[0])
+                    executor.submit(process_polygons, pile_data,list(table_list.keys())[1])
 
-            # Collect results from futures
-            points_to_create = []
-            triangle_to_create = []
+                # Collect results from futures
+                points_to_create = []
+                triangle_to_create = []
 
-            total_futures = len(futures)
-            completed_futures = 0
-            for future in concurrent.futures.as_completed(futures):
-                result = future.result()
-                if isinstance(result, list) and len(result) > 0:
-                    if isinstance(result[0], GISPointModel):
-                        points_to_create.extend(result)
-                    elif isinstance(result[0], GISDelunaryTriangleModel):
-                        triangle_to_create.extend(result)
+                total_futures = len(futures)
+                completed_futures = 0
+                for future in concurrent.futures.as_completed(futures):
+                    result = future.result()
+                    if isinstance(result, list) and len(result) > 0:
+                        if isinstance(result[0], GISPointModel):
+                            points_to_create.extend(result)
+                        elif isinstance(result[0], GISDelunaryTriangleModel):
+                            triangle_to_create.extend(result)
 
-                # Update progress for the second part
-                completed_futures += 1
-                progress = 50 + int((completed_futures / total_futures) * 50)  # Scale to 50-100%
-                try:
-                    async_to_sync(channel_layer.group_send)(
-                        channel_name,
-                        {
-                            'type': 'send.progress',
-                            'progress': progress
-                        }
-                    )
-                except Exception as e:
-                    print(e)
-            #
-            # # Bulk create points and triangles
-            GISPointModel.objects.bulk_create(points_to_create)
-            GISDelunaryTriangleModel.objects.bulk_create(triangle_to_create)
+                    # Update progress for the second part
+                    completed_futures += 1
+                    # progress = 50 + int((completed_futures / total_futures) * 50)  # Scale to 50-100%
+                    # try:
+                    #     async_to_sync(channel_layer.group_send)(
+                    #         channel_name,
+                    #         {
+                    #             'type': 'send.progress',
+                    #             'progress': progress
+                    #         }
+                    #     )
+                    # except Exception as e:
+                    #     print(e)
+                #
+                # # Bulk create points and triangles
+                GISPointModel.objects.bulk_create(points_to_create)
+                GISDelunaryTriangleModel.objects.bulk_create(triangle_to_create)
+        except Exception as e:
+            print(e)
 
         # create_contour_layer()
         create_geo_tiff()
@@ -182,54 +234,33 @@ def upload_points_v1(request):
 
 from django.db import transaction
 # Helper function to process polygons using DataFrame
-def process_polygons(pile_data):
+def process_polygons(pile_data,table_name):
     polygon = delunary_calculate(pile_data)
     df = pd.DataFrame(polygon)
     df['name'] = 'P1' + df.index.astype(str)
     df['geom'] = df['polygon_data']
     df['grading'] = df['grading'].apply(lambda x: float("{:.2f}".format(x)))
 
-    triangle_to_create = [
-        GISDelunaryTriangleModel(name=row['name'], geom=row['geom'], grading=row['grading'])
-        for _, row in df.iterrows()
-    ]
+    # triangle_to_create = [
+    #     GISDelunaryTriangleModel(name=row['name'], geom=row['geom'], grading=row['grading'])
+    #     for _, row in df.iterrows()
+    # ]
+    new = df[['name', 'geom', 'grading']].copy()
+    new = new.to_dict(orient='records')
 
-    return triangle_to_create
+    insert_query = f"""
+            INSERT INTO {table_name} (name, geom, grading)
+            VALUES {",".join([f"('{point['name']}', '{point['geom']}', '{point['grading']}')" for point in new])}
+        """
 
-from pyproj import CRS
-import geopandas as gpd
-def create_shape_file(points_data):
-    from shapely.geometry import Point
-    pile_data = []
-    for point_data in points_data:
-        for pile in point_data['piles']:
-            pile_data.append({
-                'name': 'P1',
-                'longitude': pile['Position']['lon'],
-                'latitude': pile['Position']['lat'],
-                'grading': float(pile['Solution']['Grading']),
-                'bottom_of_pile': float(pile['Solution']['Bottom'])
-            })
+    with connection.cursor() as cursor:
+        cursor.execute(insert_query)
 
-    # Convert latitude and longitude to Points
-    geometry = [Point(lon, lat) for lon, lat in zip(
-        [d["longitude"] for d in pile_data],
-        [d["latitude"] for d in pile_data]
-    )]
-
-    # Define the coordinate reference system (CRS)
-    crs = CRS.from_epsg(4326)  # WGS84 (standard geographic coordinate system)
-
-    # Create a GeoDataFrame
-    gdf = gpd.GeoDataFrame(pile_data, geometry=geometry, crs=crs)
-
-    # Save the GeoDataFrame as a shapefile
-    output_shapefile = 'points.shp'
-    gdf.to_file(output_shapefile)
+    return True
 
 
 # Helper function to process points using DataFrame
-def process_points(points_data):
+def process_points(points_data,table_name):
     pile_data = []
     for point_data in points_data:
         for pile in point_data['piles']:
@@ -245,12 +276,23 @@ def process_points(points_data):
     df['name'] += df.index.astype(str)
     df['geom'] = df.apply(lambda row: Point(row['longitude'], row['latitude']), axis=1)
 
-    points_to_create = [
-        GISPointModel(name=row['name'], geom=row['geom'], grading=row['grading'],bottom_of_pile=row['bottom_of_pile'])
-        for _, row in df.iterrows()
-    ]
+    new = df[['name', 'geom', 'grading']].copy()
+    new = new.to_dict(orient='records')
 
-    return points_to_create
+    # points_to_create = [
+    #     GISPointModel(name=row['name'], geom=row['geom'], grading=row['grading'],bottom_of_pile=row['bottom_of_pile'])
+    #     for _, row in df.iterrows()
+    # ]
+
+    insert_query = f"""
+            INSERT INTO {table_name} (name, geom, grading)
+            VALUES {",".join([f"('{point['name']}', '{point['geom']}', '{point['grading']}')" for point in new])}
+        """
+
+    with connection.cursor() as cursor:
+        cursor.execute(insert_query)
+
+    return True
 
 @api_view(['POST'])
 def upload_points(request):
@@ -662,7 +704,7 @@ def update_style_to_layer(request):
     is_contour = True if 'is_contour' in  request.data else False
     if is_contour:
         interval = request.data['interval']
-        grading_val = list(GISPointModel.objects.values_list('bottom_of_pile', flat=True))
+        grading_val = list(GISPointModel.objects.values_list('grading', flat=True))
         grading_val = [float(f'{data:.2f}') for data in grading_val]
         min_grading = min(grading_val)
         max_grading = max(grading_val)
@@ -1280,11 +1322,40 @@ SLD_CONTENT_CONTOUR = """
             <sld:Title>Contour Line</sld:Title>
             <sld:LineSymbolizer>
               <sld:Stroke>
-                <sld:CssParameter name="stroke">#ADD8E6</sld:CssParameter>
+                <sld:CssParameter name="stroke">#000000</sld:CssParameter>
                 <sld:CssParameter name="stroke-width">1</sld:CssParameter>
               </sld:Stroke>
             </sld:LineSymbolizer>
-            
+            <sld:TextSymbolizer>
+              <sld:Label>
+                <ogc:PropertyName>value</ogc:PropertyName>
+              </sld:Label>
+              <sld:Font>
+                <sld:CssParameter name="font-family">Arial</sld:CssParameter>
+                <sld:CssParameter name="font-style">Normal</sld:CssParameter>
+                <sld:CssParameter name="font-size">10</sld:CssParameter>
+              </sld:Font>
+              <sld:LabelPlacement>
+                <sld:LinePlacement/>
+              </sld:LabelPlacement>
+              <sld:Halo>
+                <sld:Radius>
+                  <ogc:Literal>2</ogc:Literal>
+                </sld:Radius>
+                <sld:Fill>
+                  <sld:CssParameter name="fill">#FFFFFF</sld:CssParameter>
+                  <sld:CssParameter name="fill-opacity">0.6</sld:CssParameter>
+                </sld:Fill>
+              </sld:Halo>
+              <sld:Fill>
+                <sld:CssParameter name="fill">#000000</sld:CssParameter>
+              </sld:Fill>
+              <sld:Priority>2000</sld:Priority>
+              <sld:VendorOption name="followLine">true</sld:VendorOption>
+              <sld:VendorOption name="repeat">100</sld:VendorOption>
+              <sld:VendorOption name="maxDisplacement">50</sld:VendorOption>
+              <sld:VendorOption name="maxAngleDelta">30</sld:VendorOption>
+            </sld:TextSymbolizer>
           </sld:Rule>
         </sld:FeatureTypeStyle>
       </sld:UserStyle>
@@ -1379,6 +1450,7 @@ from django.contrib.gis.geos import GEOSGeometry
 import matplotlib.pyplot as plt
 from django.db import connection
 # @api_view(['GET'])
+
 def create_geo_tiff():
     points = fetch_points_data()
     x = points[:, 0]
@@ -1394,27 +1466,26 @@ def create_geo_tiff():
     x_res = 100  # Grid resolution in x-direction
     y_res = 100  # Grid resolution in y-direction
 
-    # Create grid coordinates
+    # Create empty grid
     x_grid = np.linspace(x_min, x_max, x_res)
     y_grid = np.linspace(y_min, y_max, y_res)
     x_grid, y_grid = np.meshgrid(x_grid, y_grid)
+    z_grid = np.zeros_like(x_grid)
 
-    # Handle null elevation values
-    null_elevation = 10000000000000000000
-    points[:, 3] = np.where(np.isnan(points[:, 3]), null_elevation, points[:, 3])
-
-    # Interpolate grid values using IDW
-    grid_coords = np.array([x, y]).T
-    z_grid = griddata(grid_coords, points[:, 3], (x_grid, y_grid), method='cubic', fill_value=null_elevation)
+    # Assign values to grid points based on the nearest input point
+    for lon, lat , value,bottomPile in points:
+        xi = np.argmin(np.abs(x_grid[0] - lon))
+        yi = np.argmin(np.abs(y_grid[:, 0] - lat))
+        z_grid[yi , xi] = value
 
     # Flip the z_grid vertically to correct the orientation
     z_grid = np.flipud(z_grid)
-
     # Save the grid as GeoTIFF
     geotiff_path = os.path.abspath('points_grid.tif')
     save_as_geotiff(z_grid, geotiff_path, x_min, y_min, x_max, y_max)
     print(f"GeoTIFF saved at {geotiff_path}")
 
+# Save the numpy array as a GeoTIFF
 def save_as_geotiff(grid, filename, x_min, y_min, x_max, y_max):
     y_size, x_size = grid.shape
     driver = gdal.GetDriverByName('GTiff')
@@ -1441,81 +1512,6 @@ def save_as_geotiff(grid, filename, x_min, y_min, x_max, y_max):
 
     # Properly close the dataset
     dataset = None
-
-def fetch_points_data():
-    # Retrieve points data
-    points_queryset = GISPointModel.objects.all()
-
-    transformer = Transformer.from_crs("epsg:4326", "epsg:3857", always_xy=True)
-
-    # Convert to list of tuples (x, y, elevation)
-    points_list = [(*transformer.transform(point.geom.x, point.geom.y), float(point.grading), float(point.bottom_of_pile)) for point in points_queryset]
-
-    # Convert to numpy array
-    points = np.array(points_list)
-
-    return points
-# def create_geo_tiff():
-#     points = fetch_points_data()
-#     x = points[:, 0]
-#     y = points[:, 1]
-#     elev = points[:, 2]
-#
-#     # Define grid size and resolution
-#     x_min = min(x)
-#     x_max = max(x)
-#     y_min = min(y)
-#     y_max = max(y)
-#
-#     x_res = 40  # Grid resolution in x-direction
-#     y_res = 40 # Grid resolution in y-direction
-#
-#     # Create empty grid
-#     x_grid = np.linspace(x_min, x_max, x_res)
-#     y_grid = np.linspace(y_min, y_max, y_res)
-#     x_grid, y_grid = np.meshgrid(x_grid, y_grid)
-#     z_grid = np.zeros_like(x_grid)
-#
-#     # Assign values to grid points based on the nearest input point
-#     for lon, lat , value,bottomPile in points:
-#         xi = np.argmin(np.abs(x_grid[0] - lon))
-#         yi = np.argmin(np.abs(y_grid[:, 0] - lat))
-#         z_grid[yi , xi] = bottomPile
-#
-#     # Flip the z_grid vertically to correct the orientation
-#     z_grid = np.flipud(z_grid)
-#     # Save the grid as GeoTIFF
-#     geotiff_path = os.path.abspath('points_grid.tif')
-#     save_as_geotiff(z_grid, geotiff_path, x_min, y_min, x_max, y_max)
-#     print(f"GeoTIFF saved at {geotiff_path}")
-#
-# # Save the numpy array as a GeoTIFF
-# def save_as_geotiff(grid, filename, x_min, y_min, x_max, y_max):
-#     y_size, x_size = grid.shape
-#     driver = gdal.GetDriverByName('GTiff')
-#     dataset = driver.Create(filename, x_size, y_size, 1, gdal.GDT_Float32)
-#
-#     # Set geotransform (top left x, w-e pixel resolution, rotation, top left y, rotation, n-s pixel resolution)
-#     x_res = (x_max - x_min) / float(x_size)
-#     y_res = (y_max - y_min) / float(y_size)
-#     geotransform = (x_min, x_res, 0, y_max, 0, -y_res)
-#     dataset.SetGeoTransform(geotransform)
-#
-#     # Set spatial reference to EPSG:3857
-#     srs = osr.SpatialReference()
-#     srs.ImportFromEPSG(3857)
-#     dataset.SetProjection(srs.ExportToWkt())
-#
-#     band = dataset.GetRasterBand(1)
-#     band.WriteArray(grid)
-#     band.FlushCache()
-#
-#     # Verify if data is written correctly
-#     if band.ReadAsArray().shape != grid.shape:
-#         raise RuntimeError("Data writing issue: Shape mismatch")
-#
-#     # Properly close the dataset
-#     dataset = None
 
 # def create_geo_tiff():
 #     points = fetch_points_data()
@@ -1584,19 +1580,19 @@ def create_contour_layer():
     save_contours_to_postgis(linestrings)
 
 from pyproj import Transformer
-# def fetch_points_data():
-#     # Retrieve points data
-#     points_queryset = GISPointModel.objects.all()
-#
-#     transformer = Transformer.from_crs("epsg:4326", "epsg:3857", always_xy=True)
-#
-#     # Convert to list of tuples (x, y, elevation)
-#     points_list = [(*transformer.transform(point.geom.x, point.geom.y), float(point.grading),float(point.bottom_of_pile))  for point in points_queryset]
-#
-#     # Convert to numpy array
-#     points = np.array(points_list)
-#
-#     return points
+def fetch_points_data():
+    # Retrieve points data
+    points_queryset = GISPointModel.objects.all()
+
+    transformer = Transformer.from_crs("epsg:4326", "epsg:3857", always_xy=True)
+
+    # Convert to list of tuples (x, y, elevation)
+    points_list = [(*transformer.transform(point.geom.x, point.geom.y), float(point.grading),float(point.bottom_of_pile))  for point in points_queryset]
+
+    # Convert to numpy array
+    points = np.array(points_list)
+
+    return points
 
 def generate_contours(points):
     x = points[:, 0]
