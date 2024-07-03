@@ -49,6 +49,31 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+
+  redis:
+    image: redis:alpine
+    ports:
+      - 6379:6379
+
+  celery:
+    container_name: python_app
+    image: celery_app
+
+    command: celery -A poc worker -l info --uid=nobody --gid=nogroup -Q poc_tasks
+    volumes:
+      - .:/app
+    depends_on:
+      - redis
+
+  celerybeat:
+    container_name: beat
+    image: celery_app
+    command: [ "celery", "-A", "geoserver_python", "beat", "--loglevel=info", "--scheduler", "django_celery_beat.schedulers:DatabaseScheduler" ]
+    volumes:
+      - .:/app
+    depends_on:
+      - redis
+
 volumes:
   postgres_data:
   geoserver_data:
