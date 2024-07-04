@@ -82,6 +82,7 @@ import concurrent.futures
 import time
 from osgeo import gdal, osr
 import os
+from .tasks import my_task
 @api_view(['POST'])
 # Main function to handle the file upload and parallel processing
 def upload_points_v1(request):
@@ -179,6 +180,104 @@ def upload_points_v1(request):
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+def concurrency_logic(file, task=None):
+    batch_size = 1000
+    points_data = []
+    pile_data =  []
+    channel_layer = get_channel_layer()
+    channel_name = 'progress_group'
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        futures = []
+        for line in file:
+            for data in line:
+                try:
+                    points_data.append(data)
+                    pile_data.append(data['piles'])
+                except json.JSONDecodeError:
+                    pass
+
+            if len(points_data) >= batch_size:
+                # Submit tasks for parallel processing
+                futures.append(executor.submit(process_points, points_data.copy()))
+                futures.append(executor.submit(process_polygons, pile_data.copy()))
+                points_data = []
+                pile_data = []
+
+        # Process remaining points
+        if points_data:
+            futures.append(executor.submit(process_points, points_data))
+            futures.append(executor.submit(process_polygons, pile_data))
+
+        # Collect results from futures
+        points_to_create = []
+        triangle_to_create = []
+
+        total_futures = len(futures)
+        completed_futures = 0
+        for future in concurrent.futures.as_completed(futures):
+            completed_futures += 1
+
+
+        progress = 2  # Scale to 0-50%
+        try:
+            async_to_sync(channel_layer.group_send)(
+                channel_name,
+                {
+                    'type': 'send.progress',
+                    'progress': progress
+                }
+            )
+        except Exception as e:
+            print(e)
+
+@api_view(['POST'])
+def upload_points_task(request):
+    file = request.FILES.get('file')
+    if not file:
+        return Response({"error": "No file uploaded"}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        # Process file in batches
+        # Initialize WebSocket channel layer
+        channel_layer = get_channel_layer()
+        channel_name = 'progress_group'
+        GISPointModel.objects.all().delete()
+        GISDelunaryTriangleModel.objects.all().delete()
+        GISContour.objects.all().delete()
+
+        batch_size = 1000  # Adjust batch size as needed
+        points_data = []
+        pile_data = []
+        file = pd.read_json(file)
+        total_lines = len(file['Trackers'])
+        batches = total_lines / batch_size
+        batches = math.ceil(batches)
+        w = 0
+        batch_list = []
+        for i in range(0, batches):
+            temp = []
+            data = file['Trackers'][w: w + batch_size]
+            temp.append(data.tolist())
+            batch_list.append(temp)
+            w = w + batch_size
+
+        for batch in batch_list:
+            task_result = my_task.delay(batch)
+
+        return_info = {
+            'message': 'Mercator QA analysis service run queued',
+            'task_id': task_result.id
+        }
+
+        return Response({"status": "File processed successfully"}, status=status.HTTP_200_OK)
+
+
+    #     # create_contour_layer()
+    #     create_geo_tiff()
+    #     return Response({"status": "File processed successfully"}, status=status.HTTP_200_OK)
+    #
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 from django.db import transaction
 # Helper function to process polygons using DataFrame
@@ -193,6 +292,8 @@ def process_polygons(pile_data):
         GISDelunaryTriangleModel(name=row['name'], geom=row['geom'], grading=row['grading'])
         for _, row in df.iterrows()
     ]
+
+    # GISDelunaryTriangleModel.objects.bulk_create(triangle_to_create)
 
     return triangle_to_create
 
@@ -249,6 +350,8 @@ def process_points(points_data):
         GISPointModel(name=row['name'], geom=row['geom'], grading=row['grading'],bottom_of_pile=row['bottom_of_pile'])
         for _, row in df.iterrows()
     ]
+
+    # GISPointModel.objects.bulk_create(points_to_create)
 
     return points_to_create
 
@@ -660,6 +763,7 @@ def calculate_intervals(max_value, interval=10):
 @api_view(['POST'])
 def update_style_to_layer(request):
     is_contour = True if 'is_contour' in  request.data else False
+    is_geoserver_heat_styling = True if 'is_geoserver_heat_styling' in request.data else False
     if is_contour:
         interval = request.data['interval']
         grading_val = list(GISPointModel.objects.values_list('bottom_of_pile', flat=True))
@@ -685,7 +789,11 @@ def update_style_to_layer(request):
         updated_sld_content = SLD_CONTENT_CONTOUR.format(literals=ogc_literals)
     else:
         is_dynamic = request.data['is_dynamic']
-        if is_dynamic:
+        if is_geoserver_heat_styling:
+            # Update the XML content using str.format()
+            updated_sld_content = SLD_CONTENT_GEOSERVER_STYLING
+
+        elif is_dynamic:
             grading_val = list(GISDelunaryTriangleModel.objects.values_list('grading', flat=True))
             grading_val = [float(f'{data:.2f}') for data in grading_val]
             min_grading = min(grading_val)
@@ -711,6 +819,8 @@ def update_style_to_layer(request):
     style = catalog.get_style('New_heat', workspace=WORKSPACE)
     if is_contour:
         layer = catalog.get_layer(PILE_CONTOUR_GEO_TIFF_LAYER)
+    elif is_geoserver_heat_styling:
+        layer = catalog.get_layer(PILE_INFO_TABLE)
     else:
         layer = catalog.get_layer(PILE_TRIANGULAR_TABLE)
     layer.default_style = style
@@ -1284,7 +1394,36 @@ SLD_CONTENT_CONTOUR = """
                 <sld:CssParameter name="stroke-width">1</sld:CssParameter>
               </sld:Stroke>
             </sld:LineSymbolizer>
-            
+            <sld:TextSymbolizer>
+              <sld:Label>
+                <ogc:PropertyName>value</ogc:PropertyName>
+              </sld:Label>
+              <sld:Font>
+                <sld:CssParameter name="font-family">Arial</sld:CssParameter>
+                <sld:CssParameter name="font-style">Normal</sld:CssParameter>
+                <sld:CssParameter name="font-size">10</sld:CssParameter>
+              </sld:Font>
+              <sld:LabelPlacement>
+                <sld:LinePlacement/>
+              </sld:LabelPlacement>
+              <sld:Halo>
+                <sld:Radius>
+                  <ogc:Literal>2</ogc:Literal>
+                </sld:Radius>
+                <sld:Fill>
+                  <sld:CssParameter name="fill">#FFFFFF</sld:CssParameter>
+                  <sld:CssParameter name="fill-opacity">0.6</sld:CssParameter>
+                </sld:Fill>
+              </sld:Halo>
+              <sld:Fill>
+                <sld:CssParameter name="fill">#000000</sld:CssParameter>
+              </sld:Fill>
+              <sld:Priority>2000</sld:Priority>
+              <sld:VendorOption name="followLine">true</sld:VendorOption>
+              <sld:VendorOption name="repeat">100</sld:VendorOption>
+              <sld:VendorOption name="maxDisplacement">50</sld:VendorOption>
+              <sld:VendorOption name="maxAngleDelta">30</sld:VendorOption>
+            </sld:TextSymbolizer>
           </sld:Rule>
         </sld:FeatureTypeStyle>
       </sld:UserStyle>
@@ -1346,6 +1485,87 @@ SLD_CONTENT_CONTOUR_line_String = """<sld:StyledLayerDescriptor version="1.0"
   </sld:NamedLayer>
 </sld:StyledLayerDescriptor>"""
 
+SLD_CONTENT_GEOSERVER_STYLING = """
+<sld:StyledLayerDescriptor version="1.0.0"
+    xsi:schemaLocation="http://www.opengis.net/sld StyledLayerDescriptor.xsd"
+    xmlns:sld="http://www.opengis.net/sld"
+    xmlns:ogc="http://www.opengis.net/ogc"
+    xmlns:xlink="http://www.w3.org/1999/xlink"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <sld:NamedLayer>
+    <sld:Name>Heatmap</sld:Name>
+    <sld:UserStyle>
+      <sld:Title>Heatmap</sld:Title>
+      <sld:Abstract>A heatmap surface showing population density</sld:Abstract>
+      <sld:FeatureTypeStyle>
+        <sld:Transformation>
+          <ogc:Function name="vec:Heatmap">
+            <ogc:Function name="parameter">
+              <ogc:Literal>data</ogc:Literal>
+            </ogc:Function>
+            <ogc:Function name="parameter">
+              <ogc:Literal>weightAttr</ogc:Literal>
+              <ogc:Literal>pop2000</ogc:Literal>
+            </ogc:Function>
+            <ogc:Function name="parameter">
+              <ogc:Literal>radiusPixels</ogc:Literal>
+              <ogc:Function name="env">
+                <ogc:Literal>radius</ogc:Literal>
+                <ogc:Literal>100</ogc:Literal>
+              </ogc:Function>
+            </ogc:Function>
+            <ogc:Function name="parameter">
+              <ogc:Literal>pixelsPerCell</ogc:Literal>
+              <ogc:Literal>10</ogc:Literal>
+            </ogc:Function>
+            <ogc:Function name="parameter">
+              <ogc:Literal>outputBBOX</ogc:Literal>
+              <ogc:Function name="env">
+                <ogc:Literal>wms_bbox</ogc:Literal>
+              </ogc:Function>
+            </ogc:Function>
+            <ogc:Function name="parameter">
+              <ogc:Literal>outputWidth</ogc:Literal>
+              <ogc:Function name="env">
+                <ogc:Literal>wms_width</ogc:Literal>
+              </ogc:Function>
+            </ogc:Function>
+            <ogc:Function name="parameter">
+              <ogc:Literal>outputHeight</ogc:Literal>
+              <ogc:Function name="env">
+                <ogc:Literal>wms_height</ogc:Literal>
+              </ogc:Function>
+            </ogc:Function>
+          </ogc:Function>
+        </sld:Transformation>
+        <sld:Rule>
+          <sld:RasterSymbolizer>
+            <!-- specify geometry attribute to pass validation -->
+            <sld:Geometry>
+              <ogc:PropertyName>the_geom</ogc:PropertyName>
+            </sld:Geometry>
+            <sld:Opacity>0.6</sld:Opacity>
+            <sld:ColorMap type="ramp">
+              <sld:ColorMapEntry color="#BF00FF" quantity="-0.6" label="-0.6"/>
+              <sld:ColorMapEntry color="#3F00FF" quantity="-0.45" label="-0.45"/>
+              <sld:ColorMapEntry color="#003FFF" quantity="-0.3" label="-0.3" />
+              <sld:ColorMapEntry color="#00BFFF" quantity="-0.15" label="-0.15" />
+              <sld:ColorMapEntry color="#FFFFFF" quantity="-0.05" label="-0.05" />
+              <sld:ColorMapEntry color="#D6D6D6" quantity="0.0" label="0.0" />
+              <sld:ColorMapEntry color="#3FFF00" quantity="0.05" label="0.15"/>
+              <sld:ColorMapEntry color="#BFFF00" quantity="0.15" label="0.3"/>
+              <sld:ColorMapEntry color="#FFFF00" quantity="0.3" label="0.3"/>
+              <sld:ColorMapEntry color="#FFBF00" quantity="0.45" label="0.45"/>
+              <sld:ColorMapEntry color="#FF0000" quantity="0.6" label="0.6"/>
+            </sld:ColorMap>
+          </sld:RasterSymbolizer>
+        </sld:Rule>
+      </sld:FeatureTypeStyle>
+    </sld:UserStyle>
+  </sld:NamedLayer>
+</sld:StyledLayerDescriptor>
+"""
+
 # Generate SLD body for the heatmap style
 def generate_sld_body(color_range):
     sld_body = '<StyledLayerDescriptor version="1.0.0">\n'
@@ -1391,8 +1611,8 @@ def create_geo_tiff():
     y_min = min(y)
     y_max = max(y)
 
-    x_res = 100  # Grid resolution in x-direction
-    y_res = 100  # Grid resolution in y-direction
+    x_res = 50  # Grid resolution in x-direction
+    y_res = 50  # Grid resolution in y-direction
 
     # Create grid coordinates
     x_grid = np.linspace(x_min, x_max, x_res)
