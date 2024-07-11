@@ -12,7 +12,6 @@ matplotlib
 channels
 geopandas
 gdal[numpy]==3.6.2
-celery
-redis
+celery[redis]
 django-celery-beat
 

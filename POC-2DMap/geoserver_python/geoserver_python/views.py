@@ -180,42 +180,32 @@ def upload_points_v1(request):
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-def concurrency_logic(file, task=None):
+def concurrency_logic(file):
     batch_size = 1000
     points_data = []
     pile_data =  []
     channel_layer = get_channel_layer()
     channel_name = 'progress_group'
-    with concurrent.futures.ProcessPoolExecutor() as executor:
-        futures = []
-        for line in file:
-            for data in line:
-                try:
-                    points_data.append(data)
-                    pile_data.append(data['piles'])
-                except json.JSONDecodeError:
-                    pass
 
-            if len(points_data) >= batch_size:
-                # Submit tasks for parallel processing
-                futures.append(executor.submit(process_points, points_data.copy()))
-                futures.append(executor.submit(process_polygons, pile_data.copy()))
-                points_data = []
-                pile_data = []
+    for line in file:
+        for data in line:
+            try:
+                points_data.append(data)
+                pile_data.append(data['piles'])
+            except json.JSONDecodeError:
+                pass
+
+        if len(points_data) >= batch_size:
+            process_points(points_data.copy())
+            process_polygons(pile_data.copy())
+
+            points_data = []
+            pile_data = []
 
         # Process remaining points
         if points_data:
-            futures.append(executor.submit(process_points, points_data))
-            futures.append(executor.submit(process_polygons, pile_data))
-
-        # Collect results from futures
-        points_to_create = []
-        triangle_to_create = []
-
-        total_futures = len(futures)
-        completed_futures = 0
-        for future in concurrent.futures.as_completed(futures):
-            completed_futures += 1
+            process_points(points_data.copy())
+            process_polygons(pile_data.copy())
 
 
         progress = 2  # Scale to 0-50%
@@ -261,13 +251,11 @@ def upload_points_task(request):
             batch_list.append(temp)
             w = w + batch_size
 
-        for batch in batch_list:
-            task_result = my_task.delay(batch)
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            # Submit tasks asynchronously
+            for batch in batch_list:
+                executor.submit(concurrency_logic, batch)
 
-        return_info = {
-            'message': 'Mercator QA analysis service run queued',
-            'task_id': task_result.id
-        }
 
         return Response({"status": "File processed successfully"}, status=status.HTTP_200_OK)
 
@@ -282,6 +270,7 @@ def upload_points_task(request):
 from django.db import transaction
 # Helper function to process polygons using DataFrame
 def process_polygons(pile_data):
+    print("polygon_started")
     polygon = delunary_calculate(pile_data)
     df = pd.DataFrame(polygon)
     df['name'] = 'P1' + df.index.astype(str)
@@ -292,9 +281,8 @@ def process_polygons(pile_data):
         GISDelunaryTriangleModel(name=row['name'], geom=row['geom'], grading=row['grading'])
         for _, row in df.iterrows()
     ]
-
-    # GISDelunaryTriangleModel.objects.bulk_create(triangle_to_create)
-
+    GISDelunaryTriangleModel.objects.bulk_create(triangle_to_create)
+    print("polygon_ended")
     return triangle_to_create
 
 from pyproj import CRS
@@ -331,6 +319,7 @@ def create_shape_file(points_data):
 
 # Helper function to process points using DataFrame
 def process_points(points_data):
+    print("point_started")
     pile_data = []
     for point_data in points_data:
         for pile in point_data['piles']:
@@ -350,9 +339,8 @@ def process_points(points_data):
         GISPointModel(name=row['name'], geom=row['geom'], grading=row['grading'],bottom_of_pile=row['bottom_of_pile'])
         for _, row in df.iterrows()
     ]
-
-    # GISPointModel.objects.bulk_create(points_to_create)
-
+    GISPointModel.objects.bulk_create(points_to_create)
+    print("point_ended")
     return points_to_create
 
 @api_view(['POST'])

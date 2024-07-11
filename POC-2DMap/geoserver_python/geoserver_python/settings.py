@@ -148,7 +148,7 @@ STATIC_URL = '/static/'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # Celery Settings
 REDIS_URL= "host.docker.internal"
-CELERY_BROKER_URL = 'redis://redis:6379'  # or your broker URL
-CELERY_RESULT_BACKEND = 'redis://redis:6379'  # or your result backend
+CELERY_BROKER_URL = os.environment.get("CELERY_BROKER", 'redis://redis:6379/0')  # or your broker URL
+CELERY_RESULT_BACKEND = os.environment.get("CELERY_BACKEND", 'redis://redis:6379/0')  # or your result backend
 CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
 

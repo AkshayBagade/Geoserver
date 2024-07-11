@@ -33,10 +33,16 @@ services:
 #    command: daphne -b 0.0.0.0 -p 5000 geoserver_python.asgi:application
     command: ./manage.py runserver 0.0.0.0:5000
 
+    deploy:
+      resources:
+        limits:
+          cpus: '6'
+          memory: 32G
+
   geoserver:
     build:
       context: ./geoserver
-      dockerfile: Dockerfile.geoserver
+      dockerfile: ../../Bitbucket/Terabase Service/_terabase/dev/web/Dockerfile.geoserver
     ports:
       - "8081:8080"
     volumes:
@@ -57,18 +63,20 @@ services:
 
 
   redis:
-    image: redis:alpine
-    ports:
-      - 6379:6379
+    container_name: redis
+    image: redis:6.0.1
+    volumes:
+      - ./data/redis:/data
 
   celery:
     container_name: python_app
     image: celery_app
 
-    command: celery -A poc worker -l info --uid=nobody --gid=nogroup -Q poc_tasks
+    command: celery -A python_app worker -l info --uid=nobody --gid=nogroup -Q python_app
     volumes:
       - .:/app
     depends_on:
+      - db
       - redis
 
   celerybeat:
