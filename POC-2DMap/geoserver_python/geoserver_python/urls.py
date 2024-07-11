@@ -16,13 +16,16 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path
-from .views import upload_points,publish_layer_geoserver,update_style_to_layer,create_contour_layer,upload_points_v1
+from .views import upload_points,publish_layer_geoserver,update_style_to_layer,create_contour_layer,upload_points_v1,upload_points_task,create_coverage_files,publish_files_layer_in_geoserver
 
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('upload_points_layer_postgis/',upload_points, name='json'),
     path('upload_points_layer_postgis_v1/',upload_points_v1, name='json'),
+    path('upload_points_layer_postgis_v2/',upload_points_task, name='json'),
+    path('create_coverage_files/',create_coverage_files, name='json'),
     path('publish_layer/', publish_layer_geoserver, name='publish_layer_geoserver'),
+    path('publish_layer_v2/', publish_files_layer_in_geoserver, name='publish_files_layer_in_geoserver'),
     path('update_style_to_layer/',update_style_to_layer,name='update_style_to_layer'),
     path('create_contour_layer/',create_contour_layer, name='json'),
 ]

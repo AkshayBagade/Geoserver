@@ -7,6 +7,8 @@ class GISPointModel(gis_models.Model):
     geom = gis_models.PointField()
     grading = models.DecimalField(max_digits=10,decimal_places=5,default=0.0,)
     bottom_of_pile = models.DecimalField(max_digits=10,decimal_places=5,default=0.0,)
+    top_of_pile = models.DecimalField(max_digits=10,decimal_places=5,default=0.0,)
+    pile_height = models.DecimalField(max_digits=10,decimal_places=5,default=0.0,)
 
     class Meta:
         verbose_name = "GIS Model"
