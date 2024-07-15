@@ -2108,8 +2108,8 @@ def create_geo_tiff_for_heatmap_data(df,task=None):
     elev = points[:, 2]
 
     # Define grid resolution
-    x_res = 100  # Grid resolution in x-direction
-    y_res = 100  # Grid resolution in y-direction
+    x_res = 1000    # Grid resolution in x-direction
+    y_res = 1000    # Grid resolution in y-direction
 
     # Calculate grid extent
     x_min, x_max = np.min(x), np.max(x)
@@ -2155,7 +2155,12 @@ def save_as_geotiff_heat(grid, filename, x_min, x_max, y_min, y_max):
     srs.ImportFromEPSG(3857)
     dataset.SetProjection(srs.ExportToWkt())
 
-    band = dataset.GetRasterBand(1)
+    # band = dataset.GetRasterBand(1)
+    # band.WriteArray(grid)
+    # band.FlushCache()
+
+    # Write grid data to band
+    band = dataset.GetRasterBand(1)  # Bands are 1-indexed
     band.WriteArray(grid)
     band.FlushCache()
 
